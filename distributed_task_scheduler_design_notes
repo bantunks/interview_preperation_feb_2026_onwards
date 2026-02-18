@@ -1,0 +1,67 @@
+
+COPIED FROM https://www.linkedin.com/posts/activity-7429521857160110080-NnXv?utm_source=share&utm_medium=member_desktop&rcm=ACoAAAdt20sBfiJkovIgc2FhzAccvX6hmxaRx5g
+
+A candidate interviewing for L5 at Google was asked to break down the design of a distributed job scheduler during his system design round. 
+
+Another candidate interviewing for E4 at Meta was asked a very similar question.
+
+I have faced these too. It sounds simple until you add a few layers of real-world complexity.
+
+One person answers, "I will put jobs in a queue and a worker will pick them up."
+
+Another person walks through where the scheduler lives, how it stores and dispatches jobs, how it handles millions of scheduled tasks, and what happens when a worker crashes mid-execution.
+
+One loses the offer.
+One gets hired.
+
+Btw, if you're preparing for interviews right now, I also have a system design course on Udemy (it's rated 4.5 by 1,100+ SWEs): https://lnkd.in/g8p4CwcD
+
+Here is how a distributed job scheduler works behind the scenes and how you should approach it.
+
+1. What a job scheduler actually is
+
+A job scheduler lets you say "run this task at 2 AM every day" or "send this email 10 minutes from now." Unlike a simple queue, it needs to hold jobs until the right moment, then dispatch them reliably. The core challenge is doing that at scale without losing a single job or running the same job twice.
+
+This distinction between a queue and a scheduler is the first thing interviewers listen for.
+
+2. How you store jobs
+
+Every job has a payload, a scheduled time, a status, and a retry count. You need a persistent store, not just memory, because if the scheduler restarts you cannot lose pending jobs.
+
+A relational database works well here because you can query "give me all jobs where scheduled time is less than now and status is pending." You index on scheduled time so this scan is fast even with tens of millions of rows.
+
+3. How you dispatch jobs on time
+
+A polling loop runs every few seconds and fetches jobs that are due. But at scale, many scheduler nodes may run this loop simultaneously and you cannot let two nodes pick the same job.
+
+You solve this with optimistic locking or a database-level row lock. The node that wins the lock updates the job status to "running" and takes ownership. Every other node skips that row. This is the atomic claim pattern, and interviewers expect you to explain it clearly.
+
+4. How workers execute and report back
+
+Once claimed, the job is pushed to a task queue like Kafka or SQS. Workers pull from the queue, execute the job, and report success or failure back to the store.
+
+The scheduler node does not execute the job itself. It only coordinates. This separation means you can scale workers independently from the scheduler, which matters when execution is slow or bursty.
+
+5. How you handle failures and retries
+
+Workers crash. Networks time out. A job that starts running may never finish. You handle this with a heartbeat. While a job is running, the worker sends a heartbeat every few seconds. If the scheduler sees no heartbeat for two minutes, it marks the job as failed and re-queues it.
+
+You cap retries with exponential backoff so a broken job does not hammer your system forever. After N retries it moves to a dead letter store where you can inspect it manually.
+
+6. How you scale to millions of jobs
+
+One database node cannot handle the write throughput of millions of concurrent jobs polling and updating rows. You partition jobs by tenant ID or job type so different shards handle different subsets.
+
+Each scheduler node owns a subset of partitions. If a scheduler node dies, another node detects the gap through a heartbeat mechanism, think ZooKeeper or etcd for leader election, and takes over that partition. No jobs are lost, they just wait a few extra seconds.
+
+7. How you handle exactly-once execution
+
+This is where most candidates trip up. You can guarantee at-least-once delivery easily. Exactly-once is harder because network failures mean a worker may execute a job and then fail before reporting success, causing a retry.
+
+You solve this by making jobs idempotent. Each job carries a unique idempotency key. If the worker sees it has already processed that key, it skips execution and reports success. The logic runs once, even if delivery happens twice.
+
+8. How you talk to clients and monitor the system
+
+When a client submits a job, you return a job ID they can poll for status. You expose endpoints for listing jobs, cancelling them, and viewing execution history.
+
+On your side you track metrics like dispatch latency, queue depth, retry rate, and stuck jobs. When an engineer says "the nightly report never ran," these signals tell you exactly where in the pipeline it died.
